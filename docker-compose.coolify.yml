@@ -122,15 +122,14 @@ services:
       - cache
 
   httpd:
-    image: nginx:1.28.0-alpine
+    build:
+      context: .
+      dockerfile: docker/httpd/Dockerfile.pecsil
     restart: unless-stopped
     mem_limit: 64m
     environment:
       NGINX_APPLICATION_HOSTNAME: application
       SERVICE_FQDN_HTTPD_80: ${SERVICE_FQDN_HTTPD:-}
-    volumes:
-      # nginx com a consulta pública por número de rastreio (e o cadastro de contas, depois da conta da empresa) fechados.
-      - ./docker/httpd/vhost-pecsil.conf:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       - application
 

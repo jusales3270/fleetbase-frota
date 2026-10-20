@@ -1,0 +1,5 @@
+# nginx do Fleetbase da PecSil: a configuração vai dentro da imagem (o Coolify não copia arquivos do repositório
+# para montar como volume). O vhost fecha a consulta pública por número de rastreio.
+FROM nginx:1.28.0-alpine
+ENV NGINX_APPLICATION_HOSTNAME=application
+COPY docker/httpd/vhost-pecsil.conf /etc/nginx/templates/default.conf.template
