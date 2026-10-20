@@ -1,0 +1,139 @@
+# Fleetbase da PecSil no Coolify (serviço de entregas do Business OS; ver infra/fleetbase no Business OS).
+# Versão travada (v0.7.68). Nenhuma porta publicada no servidor: o acesso é pelo Traefik do Coolify, pelo nome
+# `frota.pecsil` (como a Forja). Teto de memória em cada contêiner, para nunca disputar com o Business OS.
+# Os segredos vêm das variáveis do Coolify; este arquivo não tem nenhum.
+x-api-env: &api-env
+  ENVIRONMENT: production
+  APP_DEBUG: "false"
+  APP_NAME: Fleetbase
+  APP_KEY: ${FB_APP_KEY:?FB_APP_KEY obrigatório}
+  APP_URL: ${FB_APP_URL:-http://frota.pecsil}
+  DATABASE_URL: mysql://root:${FB_DB_PASSWORD:?FB_DB_PASSWORD obrigatório}@database/fleetbase
+  QUEUE_CONNECTION: redis
+  CACHE_DRIVER: redis
+  CACHE_PATH: /fleetbase/api/storage/framework/cache
+  CACHE_URL: tcp://cache
+  REDIS_URL: tcp://cache
+  SESSION_DOMAIN: ${FB_SESSION_DOMAIN:-frota.pecsil}
+  BROADCAST_DRIVER: socketcluster
+  LOG_CHANNEL: daily
+  MAIL_FROM_NAME: Fleetbase
+  REGISTRY_HOST: https://registry.fleetbase.io
+  REGISTRY_PREINSTALLED_EXTENSIONS: "true"
+  OSRM_HOST: https://router.project-osrm.org
+  # Rotas e previsão com trânsito (Google Routes, plano Pro). A plataforma guarda a rota 3 min por entrega.
+  GOOGLE_MAPS_API_KEY: ${FB_GOOGLE_MAPS_API_KEY:-}
+  TRACKING_PROVIDER: google_routes
+  TRACKING_TRAFFIC_ENABLED: "true"
+  TRACKING_CACHE_TTL_SECONDS: "180"
+  TRACKING_ROUTE_CACHE_TTL_SECONDS: "600"
+
+services:
+  cache:
+    image: redis:4-alpine
+    restart: unless-stopped
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  database:
+    image: mysql:8.0-oracle
+    restart: unless-stopped
+    # O binlog do MySQL 8 cresce sem uso aqui (o próprio projeto desliga).
+    command: ["mysqld", "--skip-log-bin"]
+    mem_limit: 768m
+    environment:
+      MYSQL_ROOT_PASSWORD: ${FB_DB_PASSWORD:?FB_DB_PASSWORD obrigatório}
+      MYSQL_DATABASE: fleetbase
+    volumes:
+      - fleetbase_mysql:/var/lib/mysql
+    healthcheck:
+      # Pela rede (127.0.0.1), não pelo socket: na primeira subida o MySQL roda uma instância temporária só no
+      # socket, e o "pronto" pelo socket chegaria antes de ele aceitar conexões.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  socket:
+    image: socketcluster/socketcluster:v17.4.0
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      SOCKETCLUSTER_WORKERS: 2
+      SOCKETCLUSTER_BROKERS: 2
+
+  # Passo inicial (a cada deploy): cria o banco, aplica as migrações e as permissões. Termina e para.
+  setup:
+    image: fleetbase/fleetbase-api:v0.7.68
+    restart: "no"
+    healthcheck:
+      disable: true
+    command: ["sh", "-c", "for i in 1 2 3 4 5 6; do ./deploy.sh && exit 0; echo \"nova tentativa em 10 s ($$i)\"; sleep 10; done; exit 1"]
+    mem_limit: 768m
+    environment: *api-env
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+
+  application:
+    image: fleetbase/fleetbase-api:v0.7.68
+    restart: unless-stopped
+    mem_limit: 1g
+    environment: *api-env
+    volumes:
+      - fleetbase_storage:/fleetbase/api/storage/app
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+
+  queue:
+    image: fleetbase/fleetbase-api:v0.7.68
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work"]
+    mem_limit: 384m
+    # O teste de saúde herdado da imagem olha uma porta que a fila não usa.
+    healthcheck:
+      disable: true
+    environment: *api-env
+    depends_on:
+      - database
+      - cache
+
+  scheduler:
+    image: fleetbase/fleetbase-api:v0.7.68
+    restart: unless-stopped
+    command: ["go-crond", "--verbose", "root:./crontab"]
+    mem_limit: 256m
+    # O teste de saúde herdado da imagem olha uma porta que o agendador não usa.
+    healthcheck:
+      disable: true
+    environment: *api-env
+    depends_on:
+      - database
+      - cache
+
+  httpd:
+    image: nginx:1.28.0-alpine
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      NGINX_APPLICATION_HOSTNAME: application
+      SERVICE_FQDN_HTTPD_80: ${SERVICE_FQDN_HTTPD:-}
+    volumes:
+      # nginx com a consulta pública por número de rastreio (e o cadastro de contas, depois da conta da empresa) fechados.
+      - ./docker/httpd/vhost-pecsil.conf:/etc/nginx/templates/default.conf.template:ro
+    depends_on:
+      - application
+
+volumes:
+  fleetbase_mysql:
+  fleetbase_storage:
